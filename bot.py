@@ -289,30 +289,33 @@ async def cmd_survey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     lines.append("\n_Тап по кнопке блока: ▸/▾ — развернуть, ⚙ — настройки_")
 
-    # Клавиатура: построчно по блоку — [▸/▾ block]; при развороте добавляем ряд действий
+    # Клавиатура: по строке — [⚙] [▸/▾ Название] [Риск] [Фаза:процент] [VP4 ETA:дата]; при развороте — пары кнопок
     keyboard = []
     for block in BLOCKS:
         is_expanded = block in expanded
         arrow = "▾" if is_expanded else "▸"
         bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
         risk = bs.get("risk") if isinstance(bs, dict) else None
-        # Малая кнопка настроек + широкая кнопка блока (с фазой/процентом прямо в строке)
-        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else None
+        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else "—"
         prog_val = bs.get("progress") if isinstance(bs, dict) else None
+        color, _ = get_risk_info(risk) if isinstance(risk, int) else ("⚪", "")
         left_btn = InlineKeyboardButton("⚙", callback_data=f"vote:{block}")
-        right_btn = InlineKeyboardButton(_format_block_button_text(block, risk, arrow, phase_val, prog_val), callback_data=f"toggle:{block}")
-        keyboard.append([left_btn, right_btn])
+        name_btn = InlineKeyboardButton(f"{arrow} {block}", callback_data=f"toggle:{block}")
+        risk_text = f"{color} {risk}/10" if isinstance(risk, int) else "⚪ —"
+        # Нажатие на риск ведёт сразу в меню оценки рисков
+        risk_btn = InlineKeyboardButton(risk_text, callback_data=f"rate:{block}")
+        phase_prog = f"{phase_val}:{prog_val}%" if isinstance(prog_val, int) else f"{phase_val}:—"
+        # Кнопка фазы/процента открывает настройки фазы и прогресса
+        phase_btn = InlineKeyboardButton(phase_prog, callback_data=f"status:{block}")
+        eta_val = (bs.get("eta") or "—") if isinstance(bs, dict) else "—"
+        eta_btn = InlineKeyboardButton(str(eta_val), callback_data=f"eta:{block}")
+        keyboard.append([left_btn, name_btn, risk_btn, phase_btn, eta_btn])
         if is_expanded:
             phase = bs.get("phase") or "—"
             prog = bs.get("progress")
             prog_str = f"{prog}%" if isinstance(prog, int) else "—"
             eta = bs.get("eta") or "—"
-            # В развороте показываем только ETA (фаза/проценты уже в основной кнопке)
-            info_text = f"ETA {eta}"
-            keyboard.append([
-                InlineKeyboardButton("VP4 ETA", callback_data="noop"),
-                InlineKeyboardButton(info_text, callback_data="noop")
-            ])
+            # В развороте ETA не дублируем (она есть в строке блока)
             # Разворачиваем причины построчно; первая строка с меткой, остальные — без левой кнопки
             reason_titles = _reason_titles_list(bs)
             other_comment = _get_other_comment(bs)
@@ -447,12 +450,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if block not in BLOCKS:
             await query.answer("Неверный блок.", show_alert=True)
             return
+        # Подпись в верхнем окне
+        try:
+            await query.edit_message_text(f"🎯 Оценка рисков: `{block}`\nВыберите значение:", parse_mode="Markdown")
+        except Exception:
+            pass
         rows = []
         for i in range(1, 11):
             _, desc = get_risk_info(i)
             text = f"{i} ({desc})"
             rows.append([InlineKeyboardButton(text, callback_data=f"{block}:{i}")])
-        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"vote:{block}")])
+        # Назад сразу в основное меню
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
         await query.answer("Выберите оценку")
         return
@@ -686,28 +695,30 @@ async def update_main_survey(query, context):
     # Таблица полностью рендерится кнопками ниже
     lines.append("\n_Тап по кнопке блока: ▸/▾ — развернуть, ⚙ — настройки_")
     
-    # Клавиатура-таблица: слева ⚙, справа кнопка блока с риском и фазой/прогрессом; при развороте — ETA и причины
+    # Клавиатура-таблица: слева ⚙, далее: [▸/▾ Название] [Риск] [Фаза:процент] [VP4 ETA:дата]; при развороте — только причины/Others
     keyboard = []
     for block in BLOCKS:
         is_expanded = block in expanded
         arrow = "▾" if is_expanded else "▸"
         bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
         risk = bs.get("risk") if isinstance(bs, dict) else None
-        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else None
+        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else "—"
         prog_val = bs.get("progress") if isinstance(bs, dict) else None
+        eta_val = (bs.get("eta") or "—") if isinstance(bs, dict) else "—"
+        color, _ = get_risk_info(risk) if isinstance(risk, int) else ("⚪", "")
         left_btn = InlineKeyboardButton("⚙", callback_data=f"vote:{block}")
-        right_btn = InlineKeyboardButton(_format_block_button_text(block, risk, arrow, phase_val, prog_val), callback_data=f"toggle:{block}")
-        keyboard.append([left_btn, right_btn])
+        name_btn = InlineKeyboardButton(f"{arrow} {block}", callback_data=f"toggle:{block}")
+        risk_text = f"{color} {risk}/10" if isinstance(risk, int) else "⚪ —"
+        # Нажатие на риск всегда открывает меню оценки рисков
+        risk_btn = InlineKeyboardButton(risk_text, callback_data=f"rate:{block}")
+        phase_prog = f"{phase_val}:{prog_val}%" if isinstance(prog_val, int) else f"{phase_val}:—"
+        # Кнопка фазы/процента открывает настройки фазы и прогресса
+        phase_btn = InlineKeyboardButton(phase_prog, callback_data=f"status:{block}")
+        # Кнопка ETA всегда в основной строке
+        eta_btn = InlineKeyboardButton(str(eta_val), callback_data=f"eta:{block}")
+        keyboard.append([left_btn, name_btn, risk_btn, phase_btn, eta_btn])
         if is_expanded:
-            phase = bs.get("phase") or "—"
-            prog = bs.get("progress")
-            prog_str = f"{prog}%" if isinstance(prog, int) else "—"
-            eta = bs.get("eta") or "—"
-            info_text = f"ETA {eta}"
-            keyboard.append([
-                InlineKeyboardButton("VP4 ETA", callback_data="noop"),
-                InlineKeyboardButton(info_text, callback_data="noop")
-            ])
+            # ETA не дублируем при развороте
             # Причины построчно: первая с меткой, остальные с пустой левой кнопкой
             reason_titles = _reason_titles_list(bs)
             other_comment = _get_other_comment(bs)
@@ -774,7 +785,7 @@ async def open_status_menu(query, context, block: str):
     if WEBAPP_ENABLED and WEBAPP_URL and "<your-pages-domain>" not in WEBAPP_URL:
         webapp_button = InlineKeyboardButton("📝 Коммент (форма)", web_app=WebAppInfo(url=f"{WEBAPP_URL}?block={block}&chat_id={chat_id_str}"))
         bottom.append(webapp_button)
-    back_btn = [InlineKeyboardButton("⬅️ Назад", callback_data=f"vote:{block}")]
+    back_btn = [InlineKeyboardButton("⬅️ Назад", callback_data="back:main")]
 
     keyboard = [phase_buttons, prog_buttons, bottom, back_btn]
     try:
@@ -811,7 +822,9 @@ async def open_status_menu_only_phase(query, context, block: str, show_progress:
         rows.append([InlineKeyboardButton("75%", callback_data=f"progress:{block}:75")])
         rows.append([InlineKeyboardButton("100%", callback_data=f"progress:{block}:100")])
         rows.append([InlineKeyboardButton("✍️", callback_data=f"progress:{block}:txt")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"vote:{block}")])
+    # Назад: если мы в прогрессе — возвращаемся к фазам; если в фазах — в основное меню
+    back_cb = f"status:{block}" if show_progress else "back:main"
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
     await query.edit_message_text("\n".join(text_lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 async def open_reasons_menu(query, context, block: str, page: int = 0):
@@ -881,7 +894,7 @@ async def open_calendar(query, context, block: str, year: int, month: int):
     # Доп. кнопки
     kb_rows.append([
         InlineKeyboardButton("✍️ Ввести", callback_data=f"caltype:{block}"),
-        InlineKeyboardButton("⬅️ Назад", callback_data=f"vote:{block}"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="back:main"),
     ])
 
     await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
