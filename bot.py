@@ -38,7 +38,7 @@ REASONS = [
     ("coverage_gaps", "Coverage gaps"),
     ("xblock_deps", "Cross-block dependencies"),
     ("resource_constraints", "Resource constraints"),
-    ("other", "Иное"),
+    ("other", "✍️"),
 ]
 
 def _load(path, default):
@@ -96,8 +96,11 @@ def set_latest_vote(ctx, chat_id_str: str, block: str, score: int, user_id: int)
     return
 
 def save_all(ctx):
-    _save(VOTES_PATH, ctx.bot_data.get("votes", {}))
-    _save(POSTS_PATH, ctx.bot_data.get("posts", {}))
+    # Всегда подгружаем текущее состояние с диска, чтобы не перезаписать пустым
+    votes = get_votes(ctx)
+    posts = get_posts(ctx)
+    _save(VOTES_PATH, votes)
+    _save(POSTS_PATH, posts)
 
 def _ensure_block_state(state_by_chat, chat_id: str, block: str):
     # legacy helper: не используется
@@ -153,6 +156,40 @@ def _format_reasons_with_comment(state) -> str:
             return comment
         return f"{reasons} • {comment}"
     return reasons
+
+def _format_block_button_text(block: str, risk: int | None, arrow: str, phase: str | None = None, progress: int | None = None) -> str:
+    # Компактная строка: минимальный отступ между названием и оценкой
+    block_padded = (block or "")
+    phase_part = ""
+    if isinstance(progress, int) or (phase and phase != "—"):
+        prog_str = f":{progress}%" if isinstance(progress, int) else ""
+        phase_val = phase or "—"
+        phase_part = f" | {phase_val}{prog_str}"
+    if isinstance(risk, int):
+        color, _ = get_risk_info(risk)
+        return f"{color} {arrow} {block_padded} | {risk}/10{phase_part}"
+    return f"⚪ {arrow} {block_padded} | —{phase_part}"
+
+def _reason_titles_list(state) -> list:
+    # Возвращает только названия причин (без 'other' и без комментария)
+    keys = state.get("reasons") or []
+    titles_map = {k: t for k, t in REASONS}
+    titles = []
+    for k in keys:
+        if k == "other":
+            continue
+        t = titles_map.get(k)
+        if isinstance(t, str):
+            titles.append(t)
+    return titles
+
+def _get_other_comment(state):
+    # Показываем комментарий только если выбрана причина 'other'
+    reasons = state.get("reasons") or []
+    if "other" not in reasons:
+        return None
+    text = (state.get("comment") or "").strip()
+    return text if text else None
 
 def make_keyboard_compact(block: str, current_vote=None) -> InlineKeyboardMarkup:
     # legacy: не используется
@@ -235,33 +272,68 @@ async def cmd_survey(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Создаем/обновляем одно единственное сообщение-опрос в этом чате
     lines = ["🎯 *Оценка рисков VP4*\n"]
-    lines.append("Оцените вероятность не уложиться в срок (1-10):")
-    lines.append("1 все шикарно • 10 огромный риск\n")
 
     chat_id_str = str(update.effective_chat.id)
     status_all = get_status_from_votes(context, chat_id_str)
+    posts = get_posts(context)
+    chat_posts = posts.setdefault(chat_id_str, {})
+    header = chat_posts.get("header")
+    if header:
+        lines.append(header)
+    else:
+        lines.append("Оцените вероятность не уложиться в срок (1-10):")
+        lines.append("1 все шикарно • 10 огромный риск\n")
+    expanded = set(chat_posts.get("expanded", []))
     
-    for block in BLOCKS:
-        block_state = status_all.get(block, {})
-        status_str = _format_status_summary(block_state) if block_state else "—"
-        reasons_str = _format_reasons_with_comment(block_state) if block_state else "—"
+    # Текст таблицы не содержит строк по блокам — вся таблица рендерится как кнопки
+    
+    lines.append("\n_Тап по кнопке блока: ▸/▾ — развернуть, ⚙ — настройки_")
 
-        score = block_state.get("risk") if isinstance(block_state, dict) else None
-        if isinstance(score, int):
-            color, _description = get_risk_info(score)
-            lines.append(f"{color} `{block:<12}` | {status_str} | {reasons_str} | {score}/10")
-        else:
-            lines.append(f"⚪ `{block:<12}` | {status_str} | {reasons_str} | —")
-
-    lines.append("\n_Нажмите на блок для голосования_")
-
+    # Клавиатура: построчно по блоку — [▸/▾ block]; при развороте добавляем ряд действий
     keyboard = []
-    row = []
-    for i, block in enumerate(BLOCKS):
-        row.append(InlineKeyboardButton(block, callback_data=f"vote:{block}"))
-        if len(row) == 3 or i == len(BLOCKS) - 1:
-            keyboard.append(row)
-            row = []
+    for block in BLOCKS:
+        is_expanded = block in expanded
+        arrow = "▾" if is_expanded else "▸"
+        bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
+        risk = bs.get("risk") if isinstance(bs, dict) else None
+        # Малая кнопка настроек + широкая кнопка блока (с фазой/процентом прямо в строке)
+        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else None
+        prog_val = bs.get("progress") if isinstance(bs, dict) else None
+        left_btn = InlineKeyboardButton("⚙", callback_data=f"vote:{block}")
+        right_btn = InlineKeyboardButton(_format_block_button_text(block, risk, arrow, phase_val, prog_val), callback_data=f"toggle:{block}")
+        keyboard.append([left_btn, right_btn])
+        if is_expanded:
+            phase = bs.get("phase") or "—"
+            prog = bs.get("progress")
+            prog_str = f"{prog}%" if isinstance(prog, int) else "—"
+            eta = bs.get("eta") or "—"
+            # В развороте показываем только ETA (фаза/проценты уже в основной кнопке)
+            info_text = f"ETA {eta}"
+            keyboard.append([
+                InlineKeyboardButton("VP4 ETA", callback_data="noop"),
+                InlineKeyboardButton(info_text, callback_data="noop")
+            ])
+            # Разворачиваем причины построчно; первая строка с меткой, остальные — без левой кнопки
+            reason_titles = _reason_titles_list(bs)
+            other_comment = _get_other_comment(bs)
+            if reason_titles:
+                for idx, title in enumerate(reason_titles):
+                    if idx == 0:
+                        keyboard.append([
+                            InlineKeyboardButton("Причины", callback_data=f"show:reasons:{block}"),
+                            InlineKeyboardButton(title, callback_data=f"show:reasons:{block}")
+                        ])
+                    else:
+                        keyboard.append([
+                            InlineKeyboardButton(" ", callback_data=f"show:reasons:{block}"),
+                            InlineKeyboardButton(title, callback_data=f"show:reasons:{block}")
+                        ])
+            # 'Иное' (Others) — отдельной строкой, если есть текст комментария (без активного callback)
+            if other_comment:
+                keyboard.append([
+                    InlineKeyboardButton("Others", callback_data="noop"),
+                    InlineKeyboardButton(other_comment, callback_data="noop")
+                ])
 
     main_post = posts[chat_id].get("main")
     text = "\n".join(lines)
@@ -301,6 +373,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
 
     # Разбор callback
+    if query.data.startswith("toggle:"):
+        # Развернуть/свернуть подробности блока в основной таблице
+        block = query.data.split(":", 1)[1]
+        chat_id_str = str(update.effective_chat.id)
+        posts = get_posts(context)
+        chat_posts = posts.setdefault(chat_id_str, {})
+        expanded = set(chat_posts.get("expanded", []))
+        if block in expanded:
+            expanded.remove(block)
+        else:
+            expanded.add(block)
+        chat_posts["expanded"] = list(expanded)
+        # Сохраняем только posts, не трогая votes
+        _save(POSTS_PATH, posts)
+        await update_main_survey(query, context)
+        return
+    
     if query.data.startswith("vote:"):
         # Пользователь выбрал блок для голосования/управления — меняем разметку в том же сообщении
         block = query.data[5:]  # убираем "vote:"
@@ -326,9 +415,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append(webapp_row)
         keyboard += [rate_row, status_row, reasons_row, eta_row, back_btn]
 
-        # Предпочитаем не создавать новое сообщение: редактируем клавиатуру текущего сообщения.
+        # Подпишем меню: меняем текст сообщения на заголовок настроек и показываем клавиатуру действий
+        menu_text = f"⚙️ Настройки: `{block}`\nВыберите действие:"
         try:
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(menu_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except BadRequest as e:
             if "Button_type_invalid" in str(e) and WEBAPP_ENABLED:
                 keyboard_no_webapp = []
@@ -339,13 +429,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if isinstance(btn, InlineKeyboardButton) and getattr(btn, "web_app", None):
                         continue
                     keyboard_no_webapp.append(row)
-                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard_no_webapp))
+                await query.edit_message_text(menu_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard_no_webapp))
             else:
                 raise
         except TimedOut:
             # Повторим один раз с паузой и увеличенными таймаутами
             await asyncio.sleep(1.0)
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(menu_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         if user_vote:
             await query.answer(f"Текущая: {user_vote}")
         else:
@@ -512,6 +602,28 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting"] = {"type": "comment", "chat_id": update.effective_chat.id, "block": block, "reply_to": prompt.message_id, "user_id": query.from_user.id}
         return
 
+    elif query.data.startswith("show:" ):
+        # show:status:<block> или show:reasons:<block>
+        _, kind, block = query.data.split(":", 2)
+        chat_id_str = str(update.effective_chat.id)
+        status_all = get_status_from_votes(context, chat_id_str)
+        bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
+        if kind == "status":
+            phase = bs.get("phase") or "—"
+            prog = bs.get("progress")
+            prog_str = f"{prog}%" if isinstance(prog, int) else "—"
+            eta = bs.get("eta") or "—"
+            header = f"📊 Статус: {phase} {prog_str} • ETA {eta}"
+        else:
+            titles = _reason_titles_list(bs)
+            header = "⏱ Причины: " + (", ".join(titles) if titles else "—")
+        # Сохраняем заголовок в posts и перерисовываем сообщение через update_main_survey
+        posts = get_posts(context)
+        posts.setdefault(chat_id_str, {})["header"] = header
+        _save(POSTS_PATH, posts)
+        await update_main_survey(query, context)
+        return
+
     elif ":" in query.data:
         # Пользователь поставил оценку
         try:
@@ -566,34 +678,56 @@ async def update_main_survey(query, context):
     lines.append("Оцените вероятность не уложиться в срок (1-10):")
     lines.append("1 все шикарно • 10 огромный риск\n")
     
-    # Таблица блоков
-    last_map = {}
-    for block in BLOCKS:
-        # Используем только текущую оценку риска из status для этого чата
-        risk = None
-        bs = status_all.get(block, {})
-        if isinstance(bs, dict):
-            risk = bs.get("risk")
-        block_state = bs
-        status_str = _format_status_summary(block_state) if block_state else "—"
-        reasons_str = _format_reasons_with_comment(block_state) if block_state else "—"
-        if isinstance(risk, int):
-            color, _description = get_risk_info(risk)
-            lines.append(f"{color} `{block:<12}` | {status_str} | {reasons_str} | {risk}/10")
-        else:
-            lines.append(f"⚪ `{block:<12}` | {status_str} | {reasons_str} | —")
+    # Состояние разворота строк
+    posts = get_posts(context)
+    chat_posts = posts.setdefault(chat_id_str, {})
+    expanded = set(chat_posts.get("expanded", []))
+
+    # Таблица полностью рендерится кнопками ниже
+    lines.append("\n_Тап по кнопке блока: ▸/▾ — развернуть, ⚙ — настройки_")
     
-    lines.append("\n_Нажмите на блок для голосования_")
-    
-    # Создаем кнопки для каждого блока
+    # Клавиатура-таблица: слева ⚙, справа кнопка блока с риском и фазой/прогрессом; при развороте — ETA и причины
     keyboard = []
-    row = []
-    for i, block in enumerate(BLOCKS):
-        row.append(InlineKeyboardButton(block, callback_data=f"vote:{block}"))
-        # Делаем по 3 кнопки в строке
-        if len(row) == 3 or i == len(BLOCKS) - 1:
-            keyboard.append(row)
-            row = []
+    for block in BLOCKS:
+        is_expanded = block in expanded
+        arrow = "▾" if is_expanded else "▸"
+        bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
+        risk = bs.get("risk") if isinstance(bs, dict) else None
+        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else None
+        prog_val = bs.get("progress") if isinstance(bs, dict) else None
+        left_btn = InlineKeyboardButton("⚙", callback_data=f"vote:{block}")
+        right_btn = InlineKeyboardButton(_format_block_button_text(block, risk, arrow, phase_val, prog_val), callback_data=f"toggle:{block}")
+        keyboard.append([left_btn, right_btn])
+        if is_expanded:
+            phase = bs.get("phase") or "—"
+            prog = bs.get("progress")
+            prog_str = f"{prog}%" if isinstance(prog, int) else "—"
+            eta = bs.get("eta") or "—"
+            info_text = f"ETA {eta}"
+            keyboard.append([
+                InlineKeyboardButton("VP4 ETA", callback_data="noop"),
+                InlineKeyboardButton(info_text, callback_data="noop")
+            ])
+            # Причины построчно: первая с меткой, остальные с пустой левой кнопкой
+            reason_titles = _reason_titles_list(bs)
+            other_comment = _get_other_comment(bs)
+            if reason_titles:
+                for idx, title in enumerate(reason_titles):
+                    if idx == 0:
+                        keyboard.append([
+                            InlineKeyboardButton("Причины", callback_data="noop"),
+                            InlineKeyboardButton(title, callback_data="noop")
+                        ])
+                    else:
+                        keyboard.append([
+                            InlineKeyboardButton(" ", callback_data="noop"),
+                            InlineKeyboardButton(title, callback_data="noop")
+                        ])
+            if other_comment:
+                keyboard.append([
+                    InlineKeyboardButton("Others", callback_data="noop"),
+                    InlineKeyboardButton(other_comment, callback_data="noop")
+                ])
     
     await query.edit_message_text(
         "\n".join(lines), 
@@ -694,7 +828,7 @@ async def open_reasons_menu(query, context, block: str, page: int = 0):
 
     lines = [f"⏱ Причины задержки для *{block}*\n"]
     lines.append("Отметьте соответствующие пункты и нажмите Готово")
-    lines.append("\nЕсли выбрали ‘Иное’ — бот попросит ввести пояснение ответом на сообщение.")
+    lines.append("\nЕсли выбрали ‘✍️’ — бот попросит ввести пояснение ответом на сообщение.")
 
     kb_rows = []
     for key, title in page_reasons:
