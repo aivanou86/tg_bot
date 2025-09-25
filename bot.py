@@ -1,3 +1,52 @@
+def _render_main_table(context, chat_id_str: str):
+    posts = get_posts(context)
+    status_all = get_status_from_votes(context, chat_id_str)
+    chat_posts = posts.setdefault(chat_id_str, {})
+    expanded = set(chat_posts.get("expanded", []))
+
+    lines = ["🎯 *VP4 Risk Assessment*\n"]
+    lines.append("Risk reasons: check the reasons of the risk")
+    lines.append("Rate schedule risk (1-10): 1 no risk • 10 extreme risk")
+    lines.append("Progress: VP1-VP5 • 0-100%")
+    lines.append("VP4 ETA: YYYY-MM-DD\n")
+    lines.append("\n_Tap a block: ▸/▾ expand the reasons of the risk_")
+
+    keyboard = []
+    # Header row for columns
+    keyboard.append([
+        InlineKeyboardButton("Block", callback_data="noop"),
+        InlineKeyboardButton("Risk", callback_data="noop"),
+        InlineKeyboardButton("Progress", callback_data="noop"),
+        InlineKeyboardButton("VP4 ETA", callback_data="noop"),
+    ])
+    for block in BLOCKS:
+        is_expanded = block in expanded
+        arrow = "▾" if is_expanded else "▸"
+        bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
+        risk = bs.get("risk") if isinstance(bs, dict) else None
+        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else "—"
+        prog_val = bs.get("progress") if isinstance(bs, dict) else None
+        eta_val = (bs.get("eta") or "—") if isinstance(bs, dict) else "—"
+        color, _ = get_risk_info(risk) if isinstance(risk, int) else ("⚪", "")
+        # Block name button (no extra indicator)
+        name_btn = InlineKeyboardButton(f"{arrow} {block}", callback_data=f"toggle:{block}")
+        risk_text = f"{color} {risk}/10" if isinstance(risk, int) else "⚪ —"
+        risk_btn = InlineKeyboardButton(risk_text, callback_data=f"rate:{block}")
+        phase_prog = f"{phase_val}:{prog_val}%" if isinstance(prog_val, int) else f"{phase_val}:—"
+        phase_btn = InlineKeyboardButton(phase_prog, callback_data=f"status:{block}")
+        eta_btn = InlineKeyboardButton(str(eta_val), callback_data=f"eta:{block}")
+        keyboard.append([name_btn, risk_btn, phase_btn, eta_btn])
+        if is_expanded:
+            reason_titles = _reason_titles_list(bs)
+            other_comment = _get_other_comment(bs)
+            for title in (reason_titles or []):
+                keyboard.append([InlineKeyboardButton(title, callback_data="noop")])
+            if other_comment:
+                keyboard.append([InlineKeyboardButton(f"Others: {other_comment}", callback_data="noop")])
+            # Always show edit button when expanded (visually highlighted with a colored emoji)
+            keyboard.append([InlineKeyboardButton("📝 Edit reasons of the risk", callback_data=f"reasons:{block}:0")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 # pip install python-telegram-bot==20.6
 import json, os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo, ForceReply
@@ -22,6 +71,7 @@ POSTS_PATH = "vp4_posts.json"     # {"<chat_id>": {"main": {"message_id": int}}}
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://aivanou86.github.io/tg_bot/index.html")  # Укажите ваш HTTPS URL
 WEBAPP_ENABLED = "1"  # Включать WebApp-кнопки только после /setdomain
 STATUS_KEY_PREFIX = "status:"
+GLOBAL_STATUS_KEY = "status:global"
 
 # Константы фаз и причин задержки
 PHASES = ["VP1", "VP2", "VP3", "VP4", "VP5"]
@@ -81,8 +131,9 @@ def get_posts(ctx):
     return ctx.bot_data["posts"]
 
 def get_status_from_votes(ctx, chat_id_str: str):
+    # Use a single shared storage for all groups/chats
     votes = get_votes(ctx)
-    key = STATUS_KEY_PREFIX + chat_id_str
+    key = GLOBAL_STATUS_KEY
     if key not in votes or not isinstance(votes[key], dict):
         votes[key] = {}
     return votes[key]
@@ -196,20 +247,20 @@ def make_keyboard_compact(block: str, current_vote=None) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup([])
 
 def get_risk_info(score):
-    """Возвращает цвет и описание риска"""
+    """Return color and English description for risk level"""
     risk_levels = {
-        1: ("🟢", "все шикарно"),
-        2: ("🟢", "отличное состояние"),
-        3: ("🟡", "небольшие риски"),
-        4: ("🟡", "умеренный риск"),
-        5: ("🟠", "средний риск"),
-        6: ("🟠", "заметный риск"),
-        7: ("🔴", "высокий риск"),
-        8: ("🔴", "очень высокий риск"),
-        9: ("🔴", "критический риск"),
-        10: ("🔴", "огромный высокий риск")
+        1: ("🟢", "excellent"),
+        2: ("🟢", "very good"),
+        3: ("🟡", "low risk"),
+        4: ("🟡", "moderate risk"),
+        5: ("🟠", "medium risk"),
+        6: ("🟠", "elevated risk"),
+        7: ("🔴", "high risk"),
+        8: ("🔴", "very high risk"),
+        9: ("🔴", "critical risk"),
+        10: ("🔴", "extreme risk"),
     }
-    return risk_levels.get(score, ("⚪", "неизвестно"))
+    return risk_levels.get(score, ("⚪", "unknown"))
 
 def block_text_compact(block: str, votes) -> str:
     # legacy: не используется, т.к. теперь берём только последний статус
@@ -259,10 +310,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 async def cmd_survey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Только админ в группе — чтобы не спамили
+    # Group only: restrict to admins
     if update.effective_chat.type in ("group", "supergroup"):
         if not await is_admin(update, context):
-            await update.message.reply_text("⛔ Только администраторы могут запускать /survey в группе.")
+            await update.message.reply_text("⛔ Only administrators can run /survey in groups.")
             return
 
     posts = get_posts(context)
@@ -270,77 +321,10 @@ async def cmd_survey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     posts.setdefault(chat_id, {})
 
-    # Создаем/обновляем одно единственное сообщение-опрос в этом чате
-    lines = ["🎯 *Оценка рисков VP4*\n"]
-
+    # Построим текст и клавиатуру через общий рендерер
     chat_id_str = str(update.effective_chat.id)
-    status_all = get_status_from_votes(context, chat_id_str)
-    posts = get_posts(context)
-    chat_posts = posts.setdefault(chat_id_str, {})
-    header = chat_posts.get("header")
-    if header:
-        lines.append(header)
-    else:
-        lines.append("Оцените вероятность не уложиться в срок (1-10):")
-        lines.append("1 все шикарно • 10 огромный риск\n")
-    expanded = set(chat_posts.get("expanded", []))
-    
-    # Текст таблицы не содержит строк по блокам — вся таблица рендерится как кнопки
-    
-    lines.append("\n_Тап по кнопке блока: ▸/▾ — развернуть, ⚙ — настройки_")
-
-    # Клавиатура: по строке — [⚙] [▸/▾ Название] [Риск] [Фаза:процент] [VP4 ETA:дата]; при развороте — пары кнопок
-    keyboard = []
-    for block in BLOCKS:
-        is_expanded = block in expanded
-        arrow = "▾" if is_expanded else "▸"
-        bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
-        risk = bs.get("risk") if isinstance(bs, dict) else None
-        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else "—"
-        prog_val = bs.get("progress") if isinstance(bs, dict) else None
-        color, _ = get_risk_info(risk) if isinstance(risk, int) else ("⚪", "")
-        left_btn = InlineKeyboardButton("⚙", callback_data=f"vote:{block}")
-        name_btn = InlineKeyboardButton(f"{arrow} {block}", callback_data=f"toggle:{block}")
-        risk_text = f"{color} {risk}/10" if isinstance(risk, int) else "⚪ —"
-        # Нажатие на риск ведёт сразу в меню оценки рисков
-        risk_btn = InlineKeyboardButton(risk_text, callback_data=f"rate:{block}")
-        phase_prog = f"{phase_val}:{prog_val}%" if isinstance(prog_val, int) else f"{phase_val}:—"
-        # Кнопка фазы/процента открывает настройки фазы и прогресса
-        phase_btn = InlineKeyboardButton(phase_prog, callback_data=f"status:{block}")
-        eta_val = (bs.get("eta") or "—") if isinstance(bs, dict) else "—"
-        eta_btn = InlineKeyboardButton(str(eta_val), callback_data=f"eta:{block}")
-        keyboard.append([left_btn, name_btn, risk_btn, phase_btn, eta_btn])
-        if is_expanded:
-            phase = bs.get("phase") or "—"
-            prog = bs.get("progress")
-            prog_str = f"{prog}%" if isinstance(prog, int) else "—"
-            eta = bs.get("eta") or "—"
-            # В развороте ETA не дублируем (она есть в строке блока)
-            # Разворачиваем причины построчно; первая строка с меткой, остальные — без левой кнопки
-            reason_titles = _reason_titles_list(bs)
-            other_comment = _get_other_comment(bs)
-            if reason_titles:
-                for idx, title in enumerate(reason_titles):
-                    if idx == 0:
-                        keyboard.append([
-                            InlineKeyboardButton("Причины", callback_data=f"show:reasons:{block}"),
-                            InlineKeyboardButton(title, callback_data=f"show:reasons:{block}")
-                        ])
-                    else:
-                        keyboard.append([
-                            InlineKeyboardButton(" ", callback_data=f"show:reasons:{block}"),
-                            InlineKeyboardButton(title, callback_data=f"show:reasons:{block}")
-                        ])
-            # 'Иное' (Others) — отдельной строкой, если есть текст комментария (без активного callback)
-            if other_comment:
-                keyboard.append([
-                    InlineKeyboardButton("Others", callback_data="noop"),
-                    InlineKeyboardButton(other_comment, callback_data="noop")
-                ])
-
+    text, reply_markup = _render_main_table(context, chat_id_str)
     main_post = posts[chat_id].get("main")
-    text = "\n".join(lines)
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Если основное сообщение уже существует — обновим его, без создания новых
     if main_post and isinstance(main_post, dict) and "message_id" in main_post:
@@ -376,6 +360,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
 
     # Разбор callback
+    if query.data == "noop":
+        # Неактивная "кнопка"-заглушка — просто гасим подсветку
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        return
     if query.data.startswith("toggle:"):
         # Развернуть/свернуть подробности блока в основной таблице
         block = query.data.split(":", 1)[1]
@@ -397,7 +388,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Пользователь выбрал блок для голосования/управления — меняем разметку в том же сообщении
         block = query.data[5:]  # убираем "vote:"
         if block not in BLOCKS:
-            await query.answer("Неверный блок.", show_alert=True)
+            await query.answer("Invalid block.", show_alert=True)
             return
 
         votes = get_votes(context)
@@ -408,18 +399,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         params = f"block={quote_plus(block)}&chat_id={chat_id_str}"
         webapp_row = [InlineKeyboardButton("🧰 Открыть форму (WebApp)", web_app=WebAppInfo(url=f"{WEBAPP_URL}?{params}"))] if WEBAPP_ENABLED else None
         # Сохраним старые разделённые пункты как альтернативу
-        rate_row = [InlineKeyboardButton("🎯 Оценка рисков", callback_data=f"rate:{block}")]
-        status_row = [InlineKeyboardButton("📊 Текущий статус", callback_data=f"status:{block}")]
-        reasons_row = [InlineKeyboardButton("⏱ Причины рисков", callback_data=f"reasons:{block}:0")]
+        rate_row = [InlineKeyboardButton("🎯 Risk score", callback_data=f"rate:{block}")]
+        status_row = [InlineKeyboardButton("📊 Current status", callback_data=f"status:{block}")]
+        reasons_row = [InlineKeyboardButton("⏱ Risk reasons", callback_data=f"reasons:{block}:0")]
         eta_row = [InlineKeyboardButton("🗓 ETA", callback_data=f"eta:{block}")]
-        back_btn = [InlineKeyboardButton("⬅️ Назад", callback_data="back:main")]
+        back_btn = [InlineKeyboardButton("⬅️ Back", callback_data="back:main")]
         keyboard = []
         if webapp_row:
             keyboard.append(webapp_row)
         keyboard += [rate_row, status_row, reasons_row, eta_row, back_btn]
 
         # Подпишем меню: меняем текст сообщения на заголовок настроек и показываем клавиатуру действий
-        menu_text = f"⚙️ Настройки: `{block}`\nВыберите действие:"
+        menu_text = f"⚙️ Settings: `{block}`\nChoose an action:"
         try:
             await query.edit_message_text(menu_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         except BadRequest as e:
@@ -440,7 +431,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1.0)
             await query.edit_message_text(menu_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         if user_vote:
-            await query.answer(f"Текущая: {user_vote}")
+            await query.answer(f"Current: {user_vote}")
         else:
             await query.answer("Откройте меню оценки")
         return
@@ -448,11 +439,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Показать кнопки 1-10 для оценки (каждая на своей строке с описанием)
         block = query.data.split(":", 1)[1]
         if block not in BLOCKS:
-            await query.answer("Неверный блок.", show_alert=True)
+            await query.answer("Invalid block.", show_alert=True)
             return
         # Подпись в верхнем окне
         try:
-            await query.edit_message_text(f"🎯 Оценка рисков: `{block}`\nВыберите значение:", parse_mode="Markdown")
+            await query.edit_message_text(f"🎯 Risk score: `{block}`\nChoose a value:", parse_mode="Markdown")
         except Exception:
             pass
         rows = []
@@ -461,9 +452,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{i} ({desc})"
             rows.append([InlineKeyboardButton(text, callback_data=f"{block}:{i}")])
         # Назад сразу в основное меню
-        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back:main")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:main")])
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
-        await query.answer("Выберите оценку")
+        await query.answer("Choose a score")
         return
         
     elif query.data.startswith("back:"):
@@ -473,9 +464,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data.startswith("status:"):
         block = query.data.split(":", 1)[1]
-        if update.effective_chat.type in ("group", "supergroup") and not await is_admin(update, context):
-            await query.answer("Только админ может менять статус.", show_alert=True)
-            return
+        # Allow everyone to change status (phase/progress)
         # Показать только кнопки фаз VP1..VP5 (вертикально), затем проценты
         context.user_data["status_only_block"] = block
         await open_status_menu_only_phase(query, context, block, show_progress=False)
@@ -506,7 +495,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Просим процент ответом на сообщение (ForceReply), как для ETA/Иного
             prompt = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"Введите процент прогресса для {block} (0-100) и отправьте ответом на это сообщение.",
+                text=f"Enter progress for {block} (0-100) and send as a reply to this message.",
                 reply_markup=ForceReply(input_field_placeholder="0..100", selective=True)
             )
             context.user_data["awaiting"] = {"type": "progress", "chat_id": update.effective_chat.id, "block": block, "reply_to": prompt.message_id, "user_id": query.from_user.id}
@@ -529,9 +518,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Открываем меню причин (как раньше)
         _, block, page_str = query.data.split(":", 2)
         page = int(page_str)
-        if update.effective_chat.type in ("group", "supergroup") and not await is_admin(update, context):
-            await query.answer("Только админ может менять причины.", show_alert=True)
-            return
+        # Allow everyone to edit reasons
         await open_reasons_menu(query, context, block, page)
         return
 
@@ -560,9 +547,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("eta:"):
         block = query.data.split(":", 1)[1]
-        if update.effective_chat.type in ("group", "supergroup") and not await is_admin(update, context):
-            await query.answer("Только админ может менять ETA.", show_alert=True)
-            return
+        # Allow everyone to change ETA
         today = datetime.date.today()
         await open_calendar(query, context, block, today.year, today.month)
         return
@@ -579,7 +564,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Как и для комментария — просим ответом на сообщение бота (ForceReply)
         prompt = await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"Введите дату ETA для {block} в формате YYYY-MM-DD и отправьте ответом на это сообщение.",
+            text=f"Enter ETA date for {block} in format YYYY-MM-DD and reply to this message.",
             reply_markup=ForceReply(input_field_placeholder="YYYY-MM-DD", selective=True)
         )
         context.user_data["awaiting"] = {"type": "eta", "chat_id": update.effective_chat.id, "block": block, "reply_to": prompt.message_id, "user_id": query.from_user.id}
@@ -599,14 +584,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("comment:"):
         block = query.data.split(":", 1)[1]
-        if update.effective_chat.type in ("group", "supergroup") and not await is_admin(update, context):
-            await query.answer("Только админ может менять комментарий.", show_alert=True)
-            return
+        # Allow everyone to change comment
         # Всегда просим ответом на сообщение бота (ForceReply), без всплывающих алертов
         prompt = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"Напишите комментарий для {block} и отправьте ответом на это сообщение.",
-            reply_markup=ForceReply(input_field_placeholder="Комментарий…", selective=True)
+            reply_markup=ForceReply(input_field_placeholder="Comment…", selective=True)
         )
         context.user_data["awaiting"] = {"type": "comment", "chat_id": update.effective_chat.id, "block": block, "reply_to": prompt.message_id, "user_id": query.from_user.id}
         return
@@ -640,7 +623,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             score = int(score_str)
             assert block in BLOCKS and 1 <= score <= 10
         except Exception:
-            await query.answer("Неверный формат ответа.", show_alert=True)
+            await query.answer("Invalid answer format.", show_alert=True)
             return
 
         # Обновляем текущую оценку риска в status:<chat_id>
@@ -678,73 +661,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def update_main_survey(query, context):
-    """Обновляет главное сообщение с таблицей"""
-    votes = get_votes(context)
     chat_id_str = str(query._chat_id) if hasattr(query, "_chat_id") else str(query.message.chat_id)
-    status_all = get_status_from_votes(context, chat_id_str)
-    
-    lines = ["🎯 *Оценка рисков VP4*\n"]
-    lines.append("Оцените вероятность не уложиться в срок (1-10):")
-    lines.append("1 все шикарно • 10 огромный риск\n")
-    
-    # Состояние разворота строк
-    posts = get_posts(context)
-    chat_posts = posts.setdefault(chat_id_str, {})
-    expanded = set(chat_posts.get("expanded", []))
-
-    # Таблица полностью рендерится кнопками ниже
-    lines.append("\n_Тап по кнопке блока: ▸/▾ — развернуть, ⚙ — настройки_")
-    
-    # Клавиатура-таблица: слева ⚙, далее: [▸/▾ Название] [Риск] [Фаза:процент] [VP4 ETA:дата]; при развороте — только причины/Others
-    keyboard = []
-    for block in BLOCKS:
-        is_expanded = block in expanded
-        arrow = "▾" if is_expanded else "▸"
-        bs = status_all.get(block, {}) if isinstance(status_all, dict) else {}
-        risk = bs.get("risk") if isinstance(bs, dict) else None
-        phase_val = (bs.get("phase") or "—") if isinstance(bs, dict) else "—"
-        prog_val = bs.get("progress") if isinstance(bs, dict) else None
-        eta_val = (bs.get("eta") or "—") if isinstance(bs, dict) else "—"
-        color, _ = get_risk_info(risk) if isinstance(risk, int) else ("⚪", "")
-        left_btn = InlineKeyboardButton("⚙", callback_data=f"vote:{block}")
-        name_btn = InlineKeyboardButton(f"{arrow} {block}", callback_data=f"toggle:{block}")
-        risk_text = f"{color} {risk}/10" if isinstance(risk, int) else "⚪ —"
-        # Нажатие на риск всегда открывает меню оценки рисков
-        risk_btn = InlineKeyboardButton(risk_text, callback_data=f"rate:{block}")
-        phase_prog = f"{phase_val}:{prog_val}%" if isinstance(prog_val, int) else f"{phase_val}:—"
-        # Кнопка фазы/процента открывает настройки фазы и прогресса
-        phase_btn = InlineKeyboardButton(phase_prog, callback_data=f"status:{block}")
-        # Кнопка ETA всегда в основной строке
-        eta_btn = InlineKeyboardButton(str(eta_val), callback_data=f"eta:{block}")
-        keyboard.append([left_btn, name_btn, risk_btn, phase_btn, eta_btn])
-        if is_expanded:
-            # ETA не дублируем при развороте
-            # Причины построчно: первая с меткой, остальные с пустой левой кнопкой
-            reason_titles = _reason_titles_list(bs)
-            other_comment = _get_other_comment(bs)
-            if reason_titles:
-                for idx, title in enumerate(reason_titles):
-                    if idx == 0:
-                        keyboard.append([
-                            InlineKeyboardButton("Причины", callback_data="noop"),
-                            InlineKeyboardButton(title, callback_data="noop")
-                        ])
-                    else:
-                        keyboard.append([
-                            InlineKeyboardButton(" ", callback_data="noop"),
-                            InlineKeyboardButton(title, callback_data="noop")
-                        ])
-            if other_comment:
-                keyboard.append([
-                    InlineKeyboardButton("Others", callback_data="noop"),
-                    InlineKeyboardButton(other_comment, callback_data="noop")
-                ])
-    
-    await query.edit_message_text(
-        "\n".join(lines), 
-        parse_mode="Markdown", 
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    text, reply_markup = _render_main_table(context, chat_id_str)
+    try:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+    except TimedOut:
+        await asyncio.sleep(1.0)
+        try:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception:
+            pass
 
 async def open_status_menu(query, context, block: str):
     chat_id_str = str(query.message.chat_id) if hasattr(query, "message") and query.message else str(query._chat_id)
@@ -756,9 +682,9 @@ async def open_status_menu(query, context, block: str):
     eta = st.get("eta") or "—"
     comment = st.get("comment") or "—"
 
-    text_lines = [f"⚙️ *{block}* — управление статусом\n"]
-    text_lines.append(f"Фаза: `{phase}` • Прогресс: `{progress_str}` • ETA: `{eta}`")
-    text_lines.append(f"Комментарий: {comment}\n")
+    text_lines = [f"⚙️ *{block}* — status controls\n"]
+    text_lines.append(f"Phase: `{phase}` • Progress: `{progress_str}` • ETA: `{eta}`")
+    text_lines.append(f"Comment: {comment}\n")
 
     # Ряд кнопок фаз VP1..VP5 (отдельная строка)
     phase_buttons = [InlineKeyboardButton(p, callback_data=f"phase:{block}|{p}") for p in PHASES]
@@ -773,9 +699,9 @@ async def open_status_menu(query, context, block: str):
     ]
     # Нижние кнопки
     bottom = [
-        InlineKeyboardButton("⏱ Причины", callback_data=f"reasons:{block}:0"),
+        InlineKeyboardButton("⏱ Reasons", callback_data=f"reasons:{block}:0"),
         InlineKeyboardButton("🗓 ETA", callback_data=f"eta:{block}"),
-        InlineKeyboardButton("💬 Коммент", callback_data=f"comment:{block}"),
+        InlineKeyboardButton("💬 Comment", callback_data=f"comment:{block}"),
     ]
     # Кнопка WebApp-формы (если указан URL)
     try:
@@ -785,7 +711,7 @@ async def open_status_menu(query, context, block: str):
     if WEBAPP_ENABLED and WEBAPP_URL and "<your-pages-domain>" not in WEBAPP_URL:
         webapp_button = InlineKeyboardButton("📝 Коммент (форма)", web_app=WebAppInfo(url=f"{WEBAPP_URL}?block={block}&chat_id={chat_id_str}"))
         bottom.append(webapp_button)
-    back_btn = [InlineKeyboardButton("⬅️ Назад", callback_data="back:main")]
+    back_btn = [InlineKeyboardButton("⬅️ Back", callback_data="back:main")]
 
     keyboard = [phase_buttons, prog_buttons, bottom, back_btn]
     try:
@@ -807,8 +733,8 @@ async def open_status_menu_only_phase(query, context, block: str, show_progress:
     progress_str = f"{progress}%" if isinstance(progress, int) else "—"
     eta = st.get("eta") or "—"
 
-    text_lines = [f"⚙️ *{block}* — текущий статус\n"]
-    text_lines.append(f"Фаза: `{phase}` • Прогресс: `{progress_str}` • ETA: `{eta}`\n")
+    text_lines = [f"⚙️ *{block}* — current status\n"]
+    text_lines.append(f"Phase: `{phase}` • Progress: `{progress_str}` • ETA: `{eta}`\n")
 
     rows = []
     if not show_progress:
@@ -824,7 +750,7 @@ async def open_status_menu_only_phase(query, context, block: str, show_progress:
         rows.append([InlineKeyboardButton("✍️", callback_data=f"progress:{block}:txt")])
     # Назад: если мы в прогрессе — возвращаемся к фазам; если в фазах — в основное меню
     back_cb = f"status:{block}" if show_progress else "back:main"
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     await query.edit_message_text("\n".join(text_lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 async def open_reasons_menu(query, context, block: str, page: int = 0):
@@ -839,9 +765,9 @@ async def open_reasons_menu(query, context, block: str, page: int = 0):
     # Показываем все причины в одном меню без пагинации
     page_reasons = REASONS
 
-    lines = [f"⏱ Причины задержки для *{block}*\n"]
-    lines.append("Отметьте соответствующие пункты и нажмите Готово")
-    lines.append("\nЕсли выбрали ‘✍️’ — бот попросит ввести пояснение ответом на сообщение.")
+    lines = [f"⏱ Reasons for *{block}*\n"]
+    lines.append("Select applicable items and press Done")
+    lines.append("\nIf you choose ✍️, bot will ask for a comment via reply.")
 
     kb_rows = []
     for key, title in page_reasons:
@@ -849,14 +775,14 @@ async def open_reasons_menu(query, context, block: str, page: int = 0):
         # Отметка слева, затем название — без доп. выравнивания
         kb_rows.append([InlineKeyboardButton(f"{mark} {title}", callback_data=f"reason_toggle:{block}:{key}:{page}")])
 
-    kb_rows.append([InlineKeyboardButton("✅ Готово", callback_data="back:main")])
+    kb_rows.append([InlineKeyboardButton("✅ Done", callback_data="back:main")])
 
     await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
 
 async def open_calendar(query, context, block: str, year: int, month: int):
     # Заголовок
     title = datetime.date(year, month, 1).strftime("%B %Y")
-    lines = [f"🗓 Выберите дату ETA для *{block}*\n", f"`{title}`"]
+    lines = [f"🗓 Pick ETA for *{block}*\n", f"`{title}`"]
 
     # Строка дней недели (Пн-Вс)
     week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -893,8 +819,8 @@ async def open_calendar(query, context, block: str, year: int, month: int):
 
     # Доп. кнопки
     kb_rows.append([
-        InlineKeyboardButton("✍️ Ввести", callback_data=f"caltype:{block}"),
-        InlineKeyboardButton("⬅️ Назад", callback_data="back:main"),
+        InlineKeyboardButton("✍️ Enter", callback_data=f"caltype:{block}"),
+        InlineKeyboardButton("⬅️ Back", callback_data="back:main"),
     ])
 
     await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
@@ -960,7 +886,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Процент должен быть 0..100. Попробуйте ещё раз.")
                 return
         except Exception:
-            await update.message.reply_text("Введите число 0..100.")
+            await update.message.reply_text("Please enter a number 0..100.")
             return
     elif t == "eta":
         # Простая проверка формата YYYY-MM-DD
@@ -982,7 +908,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         else:
-            await update.message.reply_text("Неверный формат. Ожидается YYYY-MM-DD.")
+            await update.message.reply_text("Invalid format. Expected YYYY-MM-DD.")
             return
     elif t == "comment":
         st["comment"] = text
@@ -999,7 +925,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         # Отправим короткое уведомление в виде ephemeral-алерта нельзя; пришлём компактное сообщение и удалим через пару секунд нельзя без scheduler.
         try:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Комментарий для {block} сохранён.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Comment for {block} saved.")
         except Exception:
             pass
     else:
@@ -1079,10 +1005,10 @@ async def on_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ## inline handlers удалены
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Только админ в группе
+    # Group only: restrict to admins
     if update.effective_chat.type in ("group", "supergroup"):
         if not await is_admin(update, context):
-            await update.message.reply_text("⛔ Только администраторы могут выполнить /reset в группе.")
+            await update.message.reply_text("⛔ Only administrators can run /reset in groups.")
             return
     
     # Очистка голосов (в памяти и в файле)
@@ -1117,7 +1043,7 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Используем только текущую оценку из status:<chat_id>
     status_map = get_status_from_votes(context, chat_id)
     
-    lines = ["📊 *Сводка по всем блокам VP4:*\n"]
+    lines = ["📊 *Summary for all VP4 blocks:*\n"]
     
     # Сортируем по убыванию риска для наглядности
     for b in BLOCKS:
@@ -1139,12 +1065,12 @@ async def cmd_clearvote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Синтаксис: /clearvote <user_id> <block>
     if update.effective_chat.type in ("group", "supergroup"):
         if not await is_admin(update, context):
-            await update.message.reply_text("⛔ Только администратор может использовать /clearvote в группе.")
+            await update.message.reply_text("⛔ Only administrators can use /clearvote in groups.")
             return
     text = (update.message.text or "").strip()
     parts = text.split(maxsplit=2)
     if len(parts) < 3:
-        await update.message.reply_text("Использование: /clearvote <user_id> <block>")
+        await update.message.reply_text("Usage: /clearvote <user_id> <block>")
         return
     try:
         target_user_id = int(parts[1])
@@ -1193,7 +1119,8 @@ async def cmd_clearvote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    # Increase network timeouts for stability
+    app = Application.builder().token(TOKEN).connect_timeout(20).read_timeout(20).write_timeout(20).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("survey", cmd_survey))
     app.add_handler(CommandHandler("results", cmd_results))
