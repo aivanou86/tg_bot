@@ -1,1 +1,112 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VP4 Manager</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #121212; color: #fff; }
+    .wrap { padding: 16px; }
+    label { display:block; margin: 8px 0 4px; font-size: 14px; opacity: .9; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #333; background: #1c1c1c; color: #fff; }
+    textarea { min-height: 120px; resize: vertical; }
+    .row { display:flex; gap: 8px; }
+    .row input { flex:1; }
+    .hint { font-size: 12px; opacity:.8; margin-top:4px; }
+    .btn { margin-top: 12px; width: 100%; padding: 12px; background: #2ea44f; color: #fff; border: 0; border-radius: 8px; font-weight: 600; cursor: pointer; }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+  </style>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Управление блоком VP</h2>
+    <div class="row">
+      <div>
+        <label>Блок</label>
+        <input id="block" readonly>
+      </div>
+      <div>
+        <label>Чат</label>
+        <input id="chat" readonly>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Фаза</label>
+        <select id="phase">
+          <option>VP1</option>
+          <option>VP2</option>
+          <option>VP3</option>
+          <option>VP4</option>
+          <option>VP5</option>
+        </select>
+      </div>
+      <div>
+        <label>Прогресс, %</label>
+        <input id="progress" type="number" min="0" max="100" placeholder="0-100"/>
+      </div>
+    </div>
 
+    <label>ETA (YYYY-MM-DD)</label>
+    <input id="eta" placeholder="YYYY-MM-DD" />
+
+    <label>Причины риска</label>
+    <div id="reasons"></div>
+
+    <label>Комментарий (Иное)</label>
+    <textarea id="comment" placeholder="Опишите иное..."></textarea>
+    <div class="hint">Нажмите Отправить — изменения применятся сразу.</div>
+
+    <button id="send" class="btn">Отправить</button>
+  </div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+
+    const params = new URLSearchParams(location.search);
+    const block = params.get('block') || '';
+    const chatId = params.get('chat_id') || '';
+
+    document.getElementById('block').value = block;
+    document.getElementById('chat').value = chatId;
+
+    // build reasons checkboxes
+    const REASONS = [
+      ['mas_doc','Incomplete or missing MAS documentation'],
+      ['spec_not_final','Specifications not finalized or lack details about new features.'],
+      ['design_slow','Slow response from design team'],
+      ['design_wait','Long waiting time for answers on JIRA/e-mail/messenger.'],
+      ['high_complex','High block complexity'],
+      ['tb_complex','Testbench complexity'],
+      ['immature_rtl','Immature RTL design'],
+      ['late_features','Late introduction of new features'],
+      ['regression_unstable','Regression instability'],
+      ['coverage_gaps','Coverage gaps'],
+      ['xblock_deps','Cross-block dependencies'],
+      ['resource_constraints','Resource constraints'],
+      ['other','Иное'],
+    ];
+    const reasonsWrap = document.getElementById('reasons');
+    REASONS.forEach(([k, title]) => {
+      const id = 'r_' + k;
+      const line = document.createElement('div');
+      line.innerHTML = `<label><input type="checkbox" id="${id}"/> ${title}</label>`;
+      reasonsWrap.appendChild(line);
+    });
+
+    const btn = document.getElementById('send');
+    btn.addEventListener('click', () => {
+      const comment = document.getElementById('comment').value.trim();
+      const phase = document.getElementById('phase').value;
+      const progress = document.getElementById('progress').value;
+      const eta = document.getElementById('eta').value.trim();
+      const reasons = REASONS.filter(([k]) => document.getElementById('r_'+k).checked).map(([k]) => k);
+      const payload = { block, chat_id: chatId, comment, phase, progress, eta, reasons };
+      tg.sendData(JSON.stringify(payload));
+      tg.close();
+    });
+  </script>
+</body>
+</html>
